@@ -209,6 +209,4 @@ __marimo__/
 archive/
 api.yaml
 video_dataset/
-.pkl
-.pt
-.pth
+*.pkl
