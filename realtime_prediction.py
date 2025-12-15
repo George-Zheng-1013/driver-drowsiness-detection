@@ -3,6 +3,9 @@ import numpy as np
 import mediapipe as mp
 import pickle
 import os
+import time
+from threading import Thread
+import pygame
 
 mp_facemesh = mp.solutions.face_mesh
 mp_drawing = mp.solutions.drawing_utils
@@ -15,6 +18,11 @@ LEFT_EYEBROW_MID = 66
 LEFT_EYE_TOP = 159
 RIGHT_EYEBROW_MID = 296
 RIGHT_EYE_TOP = 386
+
+# 困倦检测配置
+DROWSY_TIME_THRESHOLD = 3.0  # 持续困倦3秒触发警告
+CONTINUOUS_ALERT_THRESHOLD = 10.0  # 持续困倦10秒后进入持续警告模式
+ALERT_REPEAT_INTERVAL = 3.0  # 持续警告模式下每3秒重复播放
 
 
 def eye_aspect_ratio(pts):
@@ -143,7 +151,25 @@ def draw_landmarks(frame, coords):
     cv2.line(frame, tuple(upper), tuple(lower), (0, 255, 0), 1)  # 垂直线
 
 
+def play_alert_sound(audio_path):
+    """在独立线程中播放警告音"""
+    try:
+        pygame.mixer.music.load(audio_path)
+        pygame.mixer.music.play()
+    except Exception as e:
+        print(f"播放警告音失败: {e}")
+
+
 def main():
+    # 初始化 pygame mixer
+    pygame.mixer.init()
+
+    # 警告音频路径
+    alert_audio = r"video_dataset\12月15日.WAV"
+    if not os.path.exists(alert_audio):
+        print(f"警告: 未找到音频文件 {alert_audio}")
+        alert_audio = None
+
     # 尝试加载训练好的模型
     model = None
     model_path = "drowsiness_model.pkl"
@@ -159,6 +185,12 @@ def main():
 
     cap = cv2.VideoCapture(r"video_dataset\2.mp4")
 
+    # 困倦状态跟踪
+    drowsy_start_time = None  # 困倦开始时间
+    last_alert_time = 0  # 上次警告时间
+    is_alert_playing = False  # 是否正在播放警告
+    in_continuous_mode = False  # 是否进入持续警告模式
+
     with mp_facemesh.FaceMesh(
         max_num_faces=1,
         refine_landmarks=True,
@@ -173,6 +205,7 @@ def main():
 
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             imgH, imgW, _ = frame.shape
+            current_time = time.time()
 
             results = face_mesh.process(rgb_frame)
 
@@ -189,17 +222,102 @@ def main():
                 # 模型预测
                 prediction_text = ""
                 status_color = (0, 255, 0)  # 绿色
+                is_drowsy = False
 
                 if model is not None:
                     pred = model.predict([features])[0]
                     prob = model.predict_proba([features])[0]
 
                     if pred == 1:  # 困倦
+                        is_drowsy = True
                         prediction_text = f"DROWSY (Prob: {prob[1]:.2%})"
                         status_color = (0, 0, 255)  # 红色
+
+                        # 开始计时
+                        if drowsy_start_time is None:
+                            drowsy_start_time = current_time
+                            in_continuous_mode = False
+
+                        # 计算持续困倦时间
+                        drowsy_duration = current_time - drowsy_start_time
+
+                        # 判断是否进入持续警告模式
+                        if drowsy_duration >= CONTINUOUS_ALERT_THRESHOLD:
+                            in_continuous_mode = True
+
+                            # 持续警告模式：每隔 ALERT_REPEAT_INTERVAL 秒重复播放
+                            if (
+                                alert_audio is not None
+                                and current_time - last_alert_time
+                                >= ALERT_REPEAT_INTERVAL
+                            ):
+
+                                if not pygame.mixer.music.get_busy():
+                                    Thread(
+                                        target=play_alert_sound,
+                                        args=(alert_audio,),
+                                        daemon=True,
+                                    ).start()
+                                    last_alert_time = current_time
+
+                        # 首次警告模式（3-10秒之间）
+                        elif drowsy_duration >= DROWSY_TIME_THRESHOLD:
+                            if (
+                                alert_audio is not None
+                                and current_time - last_alert_time
+                                >= DROWSY_TIME_THRESHOLD
+                            ):
+
+                                if not pygame.mixer.music.get_busy():
+                                    Thread(
+                                        target=play_alert_sound,
+                                        args=(alert_audio,),
+                                        daemon=True,
+                                    ).start()
+                                    last_alert_time = current_time
+
+                        # 显示持续时间
+                        if drowsy_duration > 0.5:
+                            duration_text = f"Drowsy Duration: {drowsy_duration:.1f}s"
+                            if in_continuous_mode:
+                                duration_text += " [CRITICAL!]"
+
+                            cv2.putText(
+                                frame,
+                                duration_text,
+                                (10, imgH - 60),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.8,
+                                (0, 0, 255),
+                                2,
+                            )
+
+                        # 闪烁警告效果
+                        if in_continuous_mode:
+                            # 持续模式下闪烁更快
+                            if int(current_time * 4) % 2 == 0:  # 每0.25秒闪烁
+                                overlay = frame.copy()
+                                cv2.rectangle(
+                                    overlay, (0, 0), (imgW, imgH), (0, 0, 255), 40
+                                )
+                                cv2.addWeighted(overlay, 0.4, frame, 0.6, 0, frame)
+                        elif drowsy_duration >= DROWSY_TIME_THRESHOLD:
+                            if int(current_time * 2) % 2 == 0:  # 每0.5秒闪烁
+                                overlay = frame.copy()
+                                cv2.rectangle(
+                                    overlay, (0, 0), (imgW, imgH), (0, 0, 255), 30
+                                )
+                                cv2.addWeighted(overlay, 0.3, frame, 0.7, 0, frame)
+
                     else:  # 非困倦
-                        prediction_text = f"ALERT (Prob: {prob[0]:.2%})"
+                        prediction_text = f"NON DROWSY (Prob: {prob[0]:.2%})"
                         status_color = (0, 255, 0)  # 绿色
+                        drowsy_start_time = None  # 重置困倦计时
+                        in_continuous_mode = False  # 退出持续警告模式
+
+                        # 检查音频是否播放完成
+                        if is_alert_playing and not pygame.mixer.music.get_busy():
+                            is_alert_playing = False
 
                 # 显示特征值
                 y_offset = 30
@@ -298,6 +416,8 @@ def main():
                     (0, 255, 255),
                     2,
                 )
+                drowsy_start_time = None  # 重置困倦计时
+                in_continuous_mode = False  # 退出持续警告模式
 
             cv2.imshow("Drowsiness Detection", frame)
 
@@ -306,6 +426,7 @@ def main():
 
     cap.release()
     cv2.destroyAllWindows()
+    pygame.mixer.quit()
 
 
 if __name__ == "__main__":
