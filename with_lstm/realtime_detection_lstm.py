@@ -299,6 +299,23 @@ def main():
         print(f"警告: 未找到音频文件 {alert_audio}")
         alert_audio = None
 
+    # 加载标准化参数 (新增)
+    norm_params_path = "normalization_params.npy"
+    norm_mean = None
+    norm_std = None
+    if os.path.exists(norm_params_path):
+        try:
+            norm_params = np.load(norm_params_path, allow_pickle=True).item()
+            norm_mean = norm_params["mean"]
+            norm_std = norm_params["std"]
+            print("已加载标准化参数，将对输入进行归一化处理")
+        except Exception as e:
+            print(f"加载标准化参数失败: {e}")
+    else:
+        print(
+            "警告: 未找到 normalization_params.npy，预测可能不准确！请确保已运行训练脚本。"
+        )
+
     # 设置设备
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"使用设备: {device}")
@@ -369,7 +386,7 @@ def main():
         return
 
     # 打开视频
-    cap = cv2.VideoCapture(r"video_dataset/1.mp4")
+    cap = cv2.VideoCapture(r"video_dataset/2.mp4")
 
     # 检查视频是否成功打开
     if not cap.isOpened():
@@ -428,6 +445,10 @@ def main():
                         )
                         sequence = np.vstack([sequence, padding])
 
+                    # 数据标准化 (新增关键步骤)
+                    if norm_mean is not None and norm_std is not None:
+                        sequence = (sequence - norm_mean) / norm_std
+
                     # 转换为 PyTorch tensor
                     sequence_tensor = (
                         torch.FloatTensor(sequence).unsqueeze(0).to(device)
@@ -445,8 +466,30 @@ def main():
                     predicted_class = CLASS_NAMES[pred_idx]
                     confidence = predictions[pred_idx]
 
+                    # --- 规则修正 (Heuristic Correction) ---
+                    # 解决分心和困倦混淆的问题
+                    current_ear = features[0]  # EAR是第0个特征
+
+                    # 规则1: 如果眼睛闭合 (EAR很低)，强制判定为困倦，即使头部有动作(分心)
+                    # 这里的 0.18 是一个经验阈值，可以根据实际情况微调
+                    if current_ear < 0.18 and predicted_class == "distracted":
+                        predicted_class = "severe_drowsy"
+                        confidence = 1.0  # 规则强制
+                        prediction_text = f"{predicted_class.upper()} (Eye Closed)"
+
+                    # 规则2: 如果眼睛睁得很大，不应该是重度困倦
+                    elif current_ear > 0.25 and predicted_class == "severe_drowsy":
+                        predicted_class = "light_drowsy"  # 降级为轻度或清醒
+                        if confidence < 0.8:  # 如果置信度不高，甚至可能是清醒
+                            predicted_class = "awake"
+                        prediction_text = f"{predicted_class.upper()} (Eye Open)"
+                    else:
+                        prediction_text = (
+                            f"{predicted_class.upper()} ({confidence:.2%})"
+                        )
+                    # -------------------------------------
+
                     status_color = CLASS_COLORS[predicted_class]
-                    prediction_text = f"{predicted_class.upper()} ({confidence:.2%})"
 
                     # 更新状态跟踪
                     duration = state_tracker.update(predicted_class, current_time)
@@ -570,7 +613,7 @@ def main():
 
             cv2.imshow("LSTM Drowsiness Detection", frame)
 
-            if cv2.waitKey(10) & 0xFF == ord("q"):
+            if cv2.waitKey(1000 // SEQUENCE_LENGTH) & 0xFF == ord("q"):
                 break
 
     cap.release()
