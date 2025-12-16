@@ -212,3 +212,4 @@ video_dataset/
 *.pkl
 processed_features/
 *.pth
+*.pth
