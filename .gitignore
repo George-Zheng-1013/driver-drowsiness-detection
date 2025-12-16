@@ -210,5 +210,5 @@ archive/
 api.yaml
 video_dataset/
 *.pkl
-/processed_features
+processed_features/
 *.pth
