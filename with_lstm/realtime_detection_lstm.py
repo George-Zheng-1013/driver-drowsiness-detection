@@ -386,7 +386,7 @@ def main():
         return
 
     # 打开视频
-    cap = cv2.VideoCapture(r"video_dataset/2.mp4")
+    cap = cv2.VideoCapture(r"video_dataset\daraset.mp4")
 
     # 检查视频是否成功打开
     if not cap.isOpened():
@@ -410,6 +410,13 @@ def main():
             ret, frame = cap.read()
             if not ret:
                 break
+
+            (h, w) = frame.shape[:2]
+            target_height = 480
+            ratio = target_height / float(h)
+            new_width = int(w * ratio)
+
+            frame = cv2.resize(frame, (new_width, target_height))
 
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             imgH, imgW, _ = frame.shape
