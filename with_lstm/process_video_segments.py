@@ -152,41 +152,145 @@ def imread_unicode(img_path):
 
 def synthesize_distraction(features):
     """
-    合成分心数据:修改头部姿态特征
+    合成分心数据：模拟真实的分心场景（主要是左右转头看后视镜、看窗外等）
+
     features: [EAR, MAR, Circ, Brow, Pitch, Yaw, Roll]
+
+    核心思路:
+    1. 分心主要表现为左右转头 (Yaw 变化为主)
+    2. 侧脸时，MediaPipe 检测眼睛会出现异常（EAR 波动、Circularity 下降）
+    3. 分心时通常不会打哈欠，MAR 保持低值
+    4. 可能伴随轻微的头部倾斜 (Roll)
     """
     features_copy = features.copy()
 
-    # 随机选择转头或低头
-    if np.random.random() < 0.5:
-        # 转头 (修改 Yaw, index=5)
-        direction = np.random.choice([-1, 1])
-        yaw_offset = np.random.uniform(*YAW_DISTRACTION_RANGE)
-        features_copy[:, 5] += direction * yaw_offset
+    # === 1. 主要动作：左右转头 (修改 Yaw) ===
+    # 80% 是纯左右转头，20% 是转头+轻微低头(看中控台)
+    distraction_scenario = np.random.random()
+
+    if distraction_scenario < 0.8:
+        # 场景1: 纯左右转头 (看后视镜/侧窗)
+        direction = np.random.choice([-1, 1])  # -1左转, +1右转
+        yaw_offset = np.random.uniform(30, 60)  # 转头角度
+        features_copy[:, 5] += direction * yaw_offset  # Yaw (index=5)
+
+        # 可能伴随轻微的头部倾斜
+        if np.random.random() < 0.3:
+            roll_offset = np.random.uniform(5, 15) * direction
+            features_copy[:, 6] += roll_offset  # Roll (index=6)
+
+        distraction_intensity = abs(yaw_offset) / 60.0  # 归一化强度
+
     else:
-        # 低头 (修改 Pitch, index=4)
-        direction = np.random.choice([-1, 1])
-        pitch_offset = np.random.uniform(*PITCH_DISTRACTION_RANGE)
-        features_copy[:, 4] += direction * pitch_offset
+        # 场景2: 转头看中控台 (Yaw + 轻微 Pitch)
+        yaw_offset = np.random.uniform(20, 40) * np.random.choice([-1, 1])
+        pitch_offset = np.random.uniform(5, 12)  # 轻微低头
+        features_copy[:, 5] += yaw_offset  # Yaw
+        features_copy[:, 4] += pitch_offset  # Pitch (index=4)
+
+        distraction_intensity = 0.7
+
+    # === 2. 模拟侧脸导致的眼睛检测异常 ===
+
+    # 2.1 EAR 异常 (index=0)
+    # 修改点：移除 'dropout'，因为它会让 EAR 看起来像闭眼(Severe Drowsy)
+    # 我们只保留 'noise' (噪声) 和 'spike' (异常高值)
+    ear_disturbance_strategy = np.random.choice(["noise", "spike"])
+
+    if ear_disturbance_strategy == "noise":
+        # 策略A: 添加噪声，但确保 EAR 保持在"睁眼"范围
+        noise_std = 0.04 * distraction_intensity
+        ear_noise = np.random.normal(0, noise_std, features_copy.shape[0])
+        features_copy[:, 0] += ear_noise
+        # 关键修改：下限提高到 0.20，绝对不能低于 0.18 (Severe阈值是0.15)
+        features_copy[:, 0] = np.clip(features_copy[:, 0], 0.20, 0.38)
+
+    elif ear_disturbance_strategy == "spike":
+        # 策略B: 随机帧出现尖峰 (检测失效通常会导致数值乱跳，而不是一直闭眼)
+        num_frames = features_copy.shape[0]
+        num_spikes = int(num_frames * np.random.uniform(0.1, 0.3))
+        spike_indices = np.random.choice(num_frames, num_spikes, replace=False)
+
+        for idx in spike_indices:
+            # 设为异常值
+            if np.random.random() < 0.5:
+                features_copy[idx, 0] = np.random.uniform(0.35, 0.45)  # 异常大
+            else:
+                features_copy[idx, 0] = np.random.uniform(0.18, 0.22)  # 偏小但不是闭眼
+
+    # 2.2 Circularity (index=2)
+    # 稍微降低一点，但不要降太多
+    circ_reduction = np.random.uniform(0.05, 0.15) * distraction_intensity
+    features_copy[:, 2] -= circ_reduction
+    features_copy[:, 2] = np.clip(features_copy[:, 2], 0.4, 1.0)  # 提高下限
+
+    # 2.3 眉毛距离异常（侧脸时眉毛关键点漂移）
+    brow_noise = np.random.normal(
+        0, 0.025 * distraction_intensity, features_copy.shape[0]
+    )
+    features_copy[:, 3] += brow_noise  # Brow Distance (index=3)
+    features_copy[:, 3] = np.clip(features_copy[:, 3], 0.1, 0.5)
+
+    # === 3. MAR 保持低值（分心时不会打哈欠）===
+    # 强制压制 MAR，避免被误判为疲劳
+    features_copy[:, 1] = np.minimum(features_copy[:, 1], 0.3)  # MAR (index=1)
+    # 添加小幅噪声保持自然性
+    mar_noise = np.random.normal(0, 0.015, features_copy.shape[0])
+    features_copy[:, 1] += mar_noise
+    features_copy[:, 1] = np.clip(features_copy[:, 1], 0.0, 0.3)
+
+    # === 4. 添加时序变化（模拟转头过程）===
+    # 30% 概率模拟"快速转头"的突变
+    if np.random.random() < 0.3:
+        # 在中间某一帧快速转头
+        transition_frame = np.random.randint(
+            int(features_copy.shape[0] * 0.3), int(features_copy.shape[0] * 0.7)
+        )
+
+        # 转头前后 Yaw 有明显差异
+        yaw_jump = np.random.uniform(10, 20) * np.random.choice([-1, 1])
+        features_copy[transition_frame:, 5] += yaw_jump
+
+        # 转头瞬间 EAR 可能出现异常
+        if transition_frame > 0:
+            features_copy[
+                transition_frame - 1 : transition_frame + 2, 0
+            ] *= np.random.uniform(0.8, 1.2)
+            features_copy[:, 0] = np.clip(features_copy[:, 0], 0.1, 0.4)
+
+    # === 5. 避免 Pitch 出现大幅单纯的上下变化 ===
+    # 如果有 Pitch 变化，必须伴随 Yaw (符合真实转头逻辑)
+    # 这一步已经在场景2中处理了，这里不需要额外操作
 
     return features_copy
 
 
+# 新增阈值配置
+MAR_YAWN_THRESHOLD = 0.5  # 打哈欠阈值
+
+
 def classify_drowsiness_level(features):
     """
-    根据平均 EAR 值分类困倦程度
-    返回: 'light_drowsy' 或 'severe_drowsy'
+    根据 EAR 和 MAR 分类困倦程度
+    features: [EAR, MAR, Circ, Brow, Pitch, Yaw, Roll]
     """
-    avg_ear = np.mean(features[:, 0])  # EAR 是第一个特征
+    avg_ear = features[:, 0].mean()  # EAR 是第1个特征
+    avg_mar = features[:, 1].mean()  # MAR 是第2个特征
 
+    # 1. 严重疲劳: 眼睛闭合严重
     if avg_ear < EAR_SEVERE_DROWSY_THRESHOLD:
         return "severe_drowsy"
-    elif avg_ear < EAR_LIGHT_DROWSY_THRESHOLD:
+
+    # 2. 轻度疲劳: 眼睛半眯 OR 正在打哈欠
+    # 逻辑: EAR在中间范围，或者 EAR正常但嘴巴张大(打哈欠)
+    elif avg_ear < EAR_LIGHT_DROWSY_THRESHOLD or avg_mar > MAR_YAWN_THRESHOLD:
         return "light_drowsy"
+
+    # 3. 既不闭眼也不打哈欠 -> 视为该片段实际上是清醒的(即使在Drowsy文件夹)
     else:
-        # EAR 过高可能是误标记,记录警告但仍归类
-        print(f"  警告: EAR={avg_ear:.3f} 高于阈值,可能是误标记数据")
-        return "light_drowsy"
+        # 返回 None 表示这是一个"脏数据"，应该丢弃，不要强行标记为 light_drowsy
+        print(f"  [过滤] EAR={avg_ear:.3f}, MAR={avg_mar:.3f} -> 看起来太清醒，丢弃")
+        return None
 
 
 def process_video_segment(image_paths, prefix, category, face_mesh):
@@ -394,6 +498,11 @@ def process_all_videos():
                         continue
 
                     drowsy_level = classify_drowsiness_level(features)
+
+                    # === 修改开始: 处理 None 返回值 ===
+                    if drowsy_level is None:
+                        continue  # 跳过这个看起来像清醒的样本
+                    # === 修改结束 ===
 
                     # 保存原始样本
                     npy_path = os.path.join(
