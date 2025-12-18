@@ -1,9 +1,0 @@
-{
-    "hidden_size": 32,
-    "num_layers": 1,
-    "dropout": 0.6,
-    "learning_rate": 0.0035503048581283078,
-    "batch_size": 16,
-    "weight_decay": 0.0006978281265126031,
-    "sequence_length": 30
-}
