@@ -22,13 +22,13 @@ RIGHT_EYEBROW_MID = 296
 RIGHT_EYE_TOP = 386
 
 # 时序配置
-SEQUENCE_LENGTH = 30  # 使用30帧作为一个序列（约1秒，假设30fps）
-MIN_SEQUENCE_LENGTH = 15  # 最少需要15帧才开始预测
+SEQUENCE_LENGTH = 23
+MIN_SEQUENCE_LENGTH = 5
 
 # 警告配置
-DROWSY_TIME_THRESHOLD = 2.0  # 轻度困倦持续2秒触发警告
+DROWSY_TIME_THRESHOLD = 3.0
 SEVERE_DROWSY_TIME_THRESHOLD = 1.0  # 重度困倦持续1秒触发警告
-DISTRACTION_TIME_THRESHOLD = 3.0  # 分心持续3秒触发警告
+DISTRACTION_TIME_THRESHOLD = 5.0
 ALERT_REPEAT_INTERVAL = 3.0  # 警告重复间隔
 
 # 类别标签
@@ -299,6 +299,10 @@ def main():
         print(f"警告: 未找到音频文件 {alert_audio}")
         alert_audio = None
 
+    # 输出视频路径（新增）
+    output_video_path = "with_lstm/output_detection_result.mp4"
+    os.makedirs(os.path.dirname(output_video_path), exist_ok=True)
+
     # 加载标准化参数 (新增)
     norm_params_path = "normalization_params.npy"
     norm_mean = None
@@ -393,6 +397,15 @@ def main():
         print("错误: 无法打开视频文件")
         return
 
+    # 获取视频属性（新增）
+    original_fps = int(cap.get(cv2.CAP_PROP_FPS))
+    if original_fps == 0:
+        original_fps = 30  # 默认帧率
+
+    # 初始化 VideoWriter（新增）
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # 或使用 'H264', 'XVID' 等
+    video_writer = None
+
     # 特征序列缓冲区（滑动窗口）
     feature_buffer = deque(maxlen=SEQUENCE_LENGTH)
 
@@ -417,6 +430,15 @@ def main():
             new_width = int(w * ratio)
 
             frame = cv2.resize(frame, (new_width, target_height))
+
+            # 初始化 VideoWriter（第一帧时）（新增）
+            if video_writer is None:
+                imgH, imgW = frame.shape[:2]
+                video_writer = cv2.VideoWriter(
+                    output_video_path, fourcc, original_fps, (imgW, imgH)
+                )
+                print(f"开始保存视频到: {output_video_path}")
+                print(f"视频参数: {imgW}x{imgH} @ {original_fps}fps")
 
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             imgH, imgW, _ = frame.shape
@@ -618,12 +640,20 @@ def main():
                 feature_buffer.clear()
                 state_tracker.reset()
 
+            # 写入处理后的帧到输出视频（新增）
+            if video_writer is not None:
+                video_writer.write(frame)
+
             cv2.imshow("LSTM Drowsiness Detection", frame)
 
             if cv2.waitKey(1000 // SEQUENCE_LENGTH) & 0xFF == ord("q"):
                 break
 
+    # 释放资源（修改）
     cap.release()
+    if video_writer is not None:
+        video_writer.release()
+        print(f"视频已保存到: {output_video_path}")
     cv2.destroyAllWindows()
     pygame.mixer.quit()
 
