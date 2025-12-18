@@ -214,3 +214,4 @@ processed_features/
 *.pth
 *.pth
 with_lstm/output_detection_result.mp4
+*.npy

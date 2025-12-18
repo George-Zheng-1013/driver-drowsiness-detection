@@ -14,6 +14,9 @@ OUTPUT_NPY_DIR = "processed_features"
 EAR_LIGHT_DROWSY_THRESHOLD = 0.25
 EAR_SEVERE_DROWSY_THRESHOLD = 0.15
 
+# 眨眼过滤阈值（用于 Non Drowsy 数据）
+EAR_BLINK_THRESHOLD = 0.2  # 低于此值视为眨眼，将被丢弃
+
 # 分心合成参数
 DISTRACTION_RATIO = 0.3
 YAW_DISTRACTION_RANGE = (30, 60)
@@ -293,8 +296,19 @@ def classify_drowsiness_level(features):
         return None
 
 
-def process_video_segment(image_paths, prefix, category, face_mesh):
-    """处理一个视频片段"""
+def process_video_segment(
+    image_paths, prefix, category, face_mesh, filter_blinks=False
+):
+    """
+    处理一个视频片段
+
+    Args:
+        image_paths: 图片路径列表
+        prefix: 视频前缀
+        category: 类别名称
+        face_mesh: MediaPipe face mesh
+        filter_blinks: 是否过滤眨眼帧（仅用于 Non Drowsy 数据）
+    """
     # 按帧号排序
     image_paths.sort(key=lambda x: x[0])
 
@@ -302,6 +316,8 @@ def process_video_segment(image_paths, prefix, category, face_mesh):
 
     # 处理每一帧
     valid_frames = 0
+    blink_filtered_frames = 0
+
     for frame_num, img_path in image_paths:
         try:
             img = imread_unicode(img_path)
@@ -312,10 +328,20 @@ def process_video_segment(image_paths, prefix, category, face_mesh):
         features, landmarks = calculate_all_features(img, face_mesh)
 
         if features is not None:
+            # 如果启用眨眼过滤，检查 EAR
+            if filter_blinks:
+                ear = features[0]  # EAR 是第一个特征
+                if ear < EAR_BLINK_THRESHOLD:
+                    blink_filtered_frames += 1
+                    continue  # 跳过眨眼帧
+
             features_list.append(features)
             valid_frames += 1
 
     # 调试信息
+    if filter_blinks and blink_filtered_frames > 0:
+        print(f"  {category}/{prefix} - 过滤了 {blink_filtered_frames} 帧眨眼")
+
     if valid_frames == 0:
         print(f"警告: {category}/{prefix} - 0/{len(image_paths)} 帧检测到人脸")
     elif valid_frames < len(image_paths) * 0.5:
@@ -454,6 +480,7 @@ def process_all_videos():
         "severe_drowsy": 0,
         "distracted": 0,
         "total_frames": 0,
+        "blink_filtered": 0,  # 新增：记录过滤的眨眼帧数
     }
 
     # 修复: 使用 mp_face_mesh.FaceMesh
@@ -489,7 +516,11 @@ def process_all_videos():
 
             for prefix, image_paths in tqdm(groups.items(), desc="Processing Drowsy"):
                 features = process_video_segment(
-                    image_paths, prefix, category, face_mesh
+                    image_paths,
+                    prefix,
+                    category,
+                    face_mesh,
+                    filter_blinks=False,  # Drowsy 不过滤
                 )
 
                 if features is not None and len(features) > 0:
@@ -556,11 +587,20 @@ def process_all_videos():
             for prefix, image_paths in tqdm(
                 groups.items(), desc="Processing Non Drowsy"
             ):
+                # 关键修改：启用眨眼过滤
                 features = process_video_segment(
-                    image_paths, prefix, category, face_mesh
+                    image_paths, prefix, category, face_mesh, filter_blinks=True
                 )
 
                 if features is not None and len(features) > 0:
+                    # 再次检查：过滤后如果平均 EAR 仍然过低，说明整个片段质量不佳
+                    avg_ear = features[:, 0].mean()
+                    if avg_ear < EAR_BLINK_THRESHOLD:
+                        print(
+                            f"  [丢弃] {prefix} - 过滤后平均 EAR={avg_ear:.3f} 仍过低"
+                        )
+                        continue
+
                     if prefix in distracted_prefixes:
                         distracted_features = synthesize_distraction(features)
                         npy_path = os.path.join(
